@@ -1,32 +1,15 @@
-import asyncio
-import json
+import asyncio, json
 import websockets
-import http.server
-import socketserver
-import threading
+from http import HTTPStatus
 
-ROOMS = {}  # room_id → list of websockets
+ROOMS = {}  # room_id → active websocket list
 
-# ========== HTTP SERVER FOR RENDER HEALTH CHECK ==========
-class HealthCheckHandler(http.server.SimpleHTTPRequestHandler):
-    def do_GET(self):
-        if self.path == "/":
-            self.send_response(200)
-            self.end_headers()
-            self.wfile.write(b"OK")
-        else:
-            self.send_error(404)
+async def process_request(path, request_headers):
+    if path == "/healthz":
+        # Return HTTP 200 without upgrading to WebSocket
+        return HTTPStatus.OK, [], b"OK"
+    return None  # treat other paths as WebSocket handshake
 
-    def do_HEAD(self):
-        self.send_response(200)
-        self.end_headers()
-
-def run_http_healthcheck():
-    with socketserver.TCPServer(("", 80), HealthCheckHandler) as httpd:
-        print("HTTP healthcheck server running on port 80")
-        httpd.serve_forever()
-
-# ========== WEBSOCKET RELAY SERVER ==========
 async def ws_handler(ws, path):
     room = None
     try:
@@ -35,24 +18,23 @@ async def ws_handler(ws, path):
             if "room" in obj:
                 room = obj["room"]
                 ROOMS.setdefault(room, []).append(ws)
+            # broadcast to others in same room
             for peer in ROOMS.get(room, []):
                 if peer != ws:
                     await peer.send(msg)
-    except:
+    except websockets.ConnectionClosed:
         pass
     finally:
         if room and ws in ROOMS.get(room, []):
             ROOMS[room].remove(ws)
 
-async def run_ws():
-    async with websockets.serve(ws_handler, "0.0.0.0", 443):
-        print("WebSocket signaling server running on port 443")
-        await asyncio.Future()
+async def main():
+    port = 443
+    async with websockets.serve(
+        ws_handler, "0.0.0.0", port, process_request=process_request
+    ):
+        print(f"WebSocket signaling + health check running on port {port}")
+        await asyncio.Future()  # run forever
 
-# ========== ENTRY POINT ==========
 if __name__ == "__main__":
-    # Run HTTP healthcheck server on separate thread
-    threading.Thread(target=run_http_healthcheck, daemon=True).start()
-
-    # Run WebSocket server (async)
-    asyncio.run(run_ws())
+    asyncio.run(main())
